@@ -311,7 +311,8 @@ def test_delete_col(valkey_db, mock_valkey_client):
     assert result is True
 
     # Check that execute_command was called with the correct command
-    mock_valkey_client.execute_command.assert_called_once_with("FT.DROPINDEX", "test_collection")
+    # (DD flag required so document hashes are deleted along with the index)
+    mock_valkey_client.execute_command.assert_called_once_with("FT.DROPINDEX", "test_collection", "DD")
 
     # Test error handling - real errors should still raise
     mock_valkey_client.execute_command.side_effect = ResponseError("Error dropping index")
@@ -322,6 +323,46 @@ def test_delete_col(valkey_db, mock_valkey_client):
     mock_valkey_client.execute_command.side_effect = ResponseError("Unknown index name")
     result = valkey_db.delete_col()
     assert result is False
+
+
+def test_drop_index_deletes_documents(valkey_db, mock_valkey_client):
+    """Test that dropping an index also deletes the stored document hashes.
+
+    Regression test for #6995: a bare FT.DROPINDEX leaves mem0:<collection>:*
+    hashes behind, so recreating the index over the same prefix re-adopts and
+    re-indexes them. The DD (delete-documents) flag must always be passed.
+    """
+    mock_valkey_client.execute_command.reset_mock()
+
+    valkey_db._drop_index("test_collection")
+
+    args = mock_valkey_client.execute_command.call_args[0]
+    assert args[0] == "FT.DROPINDEX"
+    assert args[1] == "test_collection"
+    assert "DD" in args, "FT.DROPINDEX must be issued with DD to flush document hashes"
+
+
+def test_reset_flushes_documents(valkey_db, mock_valkey_client):
+    """Test that reset() flushes documents before recreating the index.
+
+    Regression test for #6995: reset() must not orphan the
+    mem0:<collection>:* hashes — otherwise the recreated index backfills them
+    and 'cleared' memories reappear in search()/get_all().
+    """
+    mock_valkey_client.execute_command.reset_mock()
+    # Make _create_index believe the index is gone so it actually recreates it
+    mock_valkey_client.ft.return_value.info.side_effect = ResponseError("not found")
+
+    result = valkey_db.reset()
+
+    assert result is True
+
+    calls = [call.args for call in mock_valkey_client.execute_command.call_args_list]
+    assert any(args[0] == "FT.CREATE" for args in calls), "index must be recreated"
+
+    drop_calls = [args for args in calls if args[0] == "FT.DROPINDEX"]
+    assert len(drop_calls) == 1
+    assert "DD" in drop_calls[0], "reset() must flush document hashes via FT.DROPINDEX ... DD"
 
 
 def test_context_aware_logging(valkey_db, mock_valkey_client):
@@ -966,6 +1007,7 @@ def test_cluster_mode_drop_index(valkey_db_cluster, mock_valkey_cluster_client):
 
     call_args = mock_valkey_cluster_client.execute_command.call_args
     assert "FT.DROPINDEX" in call_args.args
+    assert "DD" in call_args.args
 
 
 def test_cluster_mode_search(valkey_db_cluster, mock_valkey_cluster_client):

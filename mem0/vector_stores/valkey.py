@@ -683,12 +683,18 @@ class ValkeyDB(VectorStoreBase):
         """
         Drop an index by name using the documented FT.DROPINDEX command.
 
+        The DD (delete-documents) flag is always passed so the underlying
+        document hashes are removed together with the index. Without it,
+        reset()/delete_col() would orphan the mem0:<collection>:* hashes and
+        recreating the index over the same prefix would re-index them, making
+        reset() a no-op on the vector data.
+
         Args:
             collection_name (str): Name of the index to drop.
             log_level (str): Logging level for missing index ("silent", "info", "error").
         """
         try:
-            self.client.execute_command("FT.DROPINDEX", collection_name)
+            self.client.execute_command("FT.DROPINDEX", collection_name, "DD")
             logger.info(f"Successfully deleted index {collection_name}")
             return True
         except ResponseError as e:
